@@ -1,0 +1,81 @@
+{
+  "name": "codepilot",
+  "displayName": "CodePilot",
+  "description": "Generate code snippets based on your company API Docs",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "publisher": "Harshiv Thakkar",
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codepilot.ingestDocs",
+        "title": "Ingest API Documentation",
+        "category": "CodePilot"
+      },
+      {
+        "command": "codepilot.clearEndpointCache",
+        "title": "Clear Endpoint Cache",
+        "category": "CodePilot"
+      },
+      {
+        "command": "codepilot.generateAndReplace",
+        "title": "Generate Code"
+      },
+      {
+        "command": "codepilot.executeRefactor",
+        "title": "Execute Refactor"
+      }
+    ],
+    "configuration": {
+      "title": "CodePilot",
+      "properties": {
+        "codepilot.openai.apiKey": {
+          "type": "string",
+          "description": "OpenAI API Key for CodePilot",
+          "scope": "application"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "webpack",
+    "watch": "webpack --watch",
+    "package": "webpack --mode production --devtool hidden-source-map",
+    "compile-tests": "tsc -p . --outDir out",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "npm run compile-tests && npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x",
+    "@types/vscode": "^1.104.0",
+    "@typescript-eslint/eslint-plugin": "^8.42.0",
+    "@typescript-eslint/parser": "^8.42.0",
+    "@vscode/test-cli": "^0.0.11",
+    "@vscode/test-electron": "^2.5.2",
+    "eslint": "^9.34.0",
+    "ts-loader": "^9.5.4",
+    "node-loader": "^2.0.0",
+    "typescript": "^5.9.2",
+    "webpack": "^5.101.3",
+    "webpack-cli": "^6.0.1"
+  },
+
+  "dependencies": {
+    "@lancedb/lancedb": "^0.22.1",
+    "@langchain/core": "^0.3.77",
+    "@langchain/openai": "^0.6.13",
+    "langchain": "^0.3.0",
+    "dotenv": "^16.4.5"
+  }
+}

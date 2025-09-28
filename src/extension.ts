@@ -84,10 +84,18 @@ async function generateCodeLogic(
   context: vscode.ExtensionContext,
   endpointName: string,
   collectionName: string,
-  language: string
+  language: string,
+  outputChannel: vscode.OutputChannel
 ): Promise<string> {
+  outputChannel.clear();
+  outputChannel.show(true);
+  outputChannel.appendLine(
+    `[INFO] Generating code snippet for "${endpointName}" in ${language}.`
+  );
+
   const cachedCode = getCachedCode(context, endpointName, language);
   if (cachedCode) {
+    outputChannel.appendLine(`[SUCCESS] Found cached code snippet.`);
     return cachedCode;
   }
 
@@ -112,23 +120,87 @@ async function generateCodeLogic(
     apiKey: apiKey,
     model: "text-embedding-3-small",
   });
-
   const db = await connect(dbPath);
   const table = await db.openTable(collectionName);
   const queryVector = await embeddings.embedQuery(enrichedQuery);
-  const results = await table.search(queryVector).limit(4).toArray();
 
-  const contextDocs = results.map((result: any) => ({
-    pageContent: result.text,
-    metadata: result.metadata,
-  }));
-  if (contextDocs.length === 0) {
-    throw new Error(`Could not find documentation for '${endpointName}'.`);
+  // --- NEW MULTI-STEP RETRIEVAL LOGIC ---
+  outputChannel.appendLine("[DEBUG] Starting multi-step retrieval...");
+
+  // Step 1: Find the most relevant documents of any type to identify the best endpoint name.
+  const initialResults = await table.search(queryVector).limit(1).toArray();
+  if (initialResults.length === 0) {
+    throw new Error(`Could not find any documentation for '${endpointName}'.`);
   }
-  const contextText = contextDocs.map((doc) => doc.pageContent).join("\n---\n");
+  const bestEndpointName = initialResults[0].metadata.name;
+  const endpointUrl = initialResults[0].metadata.url;
+  outputChannel.appendLine(
+    `[DEBUG] Identified best matching endpoint: "${bestEndpointName}"`
+  );
+  outputChannel.appendLine(`[DEBUG] Identified URL: "${endpointUrl}"`);
+
+  // Step 2: Now, specifically fetch the 'description' and 'body' for that endpoint.
+  const descriptionFilter = `metadata.name = '${bestEndpointName}' AND metadata.type = 'description'`;
+  const bodyFilter = `metadata.name = '${bestEndpointName}' AND metadata.type = 'body'`;
+
+  const descriptionDocs = await table
+    .search(queryVector)
+    .where(descriptionFilter)
+    .limit(1)
+    .toArray();
+  const bodyDocs = await table
+    .search(queryVector)
+    .where(bodyFilter)
+    .limit(1)
+    .toArray();
+
+  const finalDocs = [...descriptionDocs, ...bodyDocs];
+  // --- END OF NEW LOGIC ---
+
+  outputChannel.appendLine(`\n---`);
+  outputChannel.appendLine(
+    `[DEBUG] Found ${finalDocs.length} high-quality document chunks.`
+  );
+  outputChannel.appendLine(`---`);
+
+  finalDocs.forEach((doc: any, index: number) => {
+    outputChannel.appendLine(`\n[CHUNK ${index + 1}]`);
+    outputChannel.appendLine(`  Metadata: ${JSON.stringify(doc.metadata)}`);
+    outputChannel.appendLine(`  Content Text:\n"${doc.text}"`);
+    outputChannel.appendLine(`---`);
+  });
+
+  const apiContextText = finalDocs.map((doc: any) => doc.text).join("\n---\n");
+  if (!apiContextText) {
+    throw new Error("Could not construct context for the AI model.");
+  }
+
+  outputChannel.appendLine(
+    `[INFO] Sending high-quality context to the AI model...`
+  );
 
   const llm = new ChatOpenAI({ model: "gpt-4o", apiKey: apiKey });
-  const prompt = `Your task is to be a raw code generator. Based on the provided API documentation, generate a single, complete, and executable code snippet in ${language}. Your response will be directly executed as ${language} code. Do NOT include any explanations, introductory text, or markdown code blocks like \`\`\`. Real User Request: "${enrichedQuery}"\nGenerate the code now:`;
+
+  // --- NEW AND IMPROVED PROMPT ---
+  const prompt = `You are an expert code generator. Your task is to generate a complete, executable code snippet in ${language}.
+
+**API Endpoint URL:**
+${endpointUrl}
+
+**API Documentation Context:**
+---
+${apiContextText}
+---
+
+**User Request:** "${enrichedQuery}"
+
+**Instructions:**
+- Generate a single, complete, executable code snippet in ${language}.
+- You **MUST** use the exact "API Endpoint URL" provided above for the API call.
+- Do NOT include any explanations, introductory text, or markdown formatting like \`\`\`.
+- Your response should be ONLY the raw code.
+
+Generate the code now:`;
 
   const result = await llm.invoke(prompt);
   let codeSnippet = result.content.toString().trim();
@@ -146,13 +218,21 @@ async function generateRefactoredCodeLogic(
   context: vscode.ExtensionContext,
   language: string,
   selectedText: string,
-  userInstruction: string
+  userInstruction: string,
+  outputChannel: vscode.OutputChannel
 ): Promise<string> {
   const config = vscode.workspace.getConfiguration("codepilot.openai");
   const apiKey = config.get<string>("apiKey");
   if (!apiKey) {
     throw new Error("OpenAI API Key is not set.");
   }
+
+  outputChannel.clear();
+  outputChannel.show(true);
+
+  outputChannel.appendLine(
+    `[INFO] Starting refactor for instruction: "${userInstruction}"`
+  );
 
   const storagePath = context.globalStorageUri.fsPath;
   const collectionDirs = fs
@@ -176,15 +256,70 @@ async function generateRefactoredCodeLogic(
     apiKey: apiKey,
     model: "text-embedding-3-small",
   });
+
   const db = await connect(dbPath);
   const table = await db.openTable(collectionName);
 
   const searchQuery = `${userInstruction} ${selectedText}`;
   const queryVector = await embeddings.embedQuery(searchQuery);
-  const results = await table.search(queryVector).limit(5).toArray();
+
+  // --- NEW HYBRID SEARCH LOGIC ---
+  // A simple (but effective) keyword extraction. You could make this more advanced later.
+  const keywords = userInstruction.split(" ").filter((word) => word.length > 3); // Example: find words longer than 3 chars
+  let results = [];
+
+  if (keywords.length > 0) {
+    // Attempt to filter using the most relevant keyword (e.g., the last one)
+    const keyword = keywords[keywords.length - 1];
+    const filterQuery = `metadata.url LIKE '%/${keyword}%'`;
+
+    console.log(
+      `[INFO] Attempting to pre-filter retrieval with: ${filterQuery}`
+    );
+
+    results = await table
+      .search(queryVector)
+      .where(filterQuery) // Apply the metadata filter
+      .limit(5)
+      .toArray();
+
+    outputChannel.appendLine(`\n---`);
+    outputChannel.appendLine(
+      `[DEBUG] Found ${results.length} relevant document chunks from the database.`
+    );
+    outputChannel.appendLine(`---`);
+
+    results.forEach((doc: any, index: number) => {
+      outputChannel.appendLine(`\n[CHUNK ${index + 1}]`);
+      outputChannel.appendLine(`  Metadata: ${JSON.stringify(doc.metadata)}`);
+      outputChannel.appendLine(`  Content Text:\n"${doc.text}"`);
+      outputChannel.appendLine(`---`);
+    });
+
+    outputChannel.appendLine(
+      `[INFO] Sending the above context to the AI model...`
+    );
+    console.log(`[INFO] Found ${results.length} results after filtering.`);
+  }
+
+  // If filtering yielded no results, fall back to a pure semantic search
+  if (results.length === 0) {
+    console.log(
+      "[INFO] Filter returned no results. Falling back to pure semantic search."
+    );
+    results = await table.search(queryVector).limit(5).toArray();
+  }
+  // --- END OF NEW LOGIC ---
+
   const apiContextText = results
     .map((result: any) => result.text)
     .join("\n---\n");
+
+  if (!apiContextText) {
+    throw new Error(
+      "Could not find any relevant API documentation for your request."
+    );
+  }
 
   const prompt = `You are an expert code refactoring assistant. Your task is to rewrite a given block of code to correctly and efficiently use an API, based on a user's instruction and the provided API documentation.
 **Goal:** Your output will be a new, improved block of code that serves as a direct, drop-in replacement for the user's original selection.
@@ -211,6 +346,7 @@ Generate the refactored code now:`;
   const llm = new ChatOpenAI({ model: "gpt-4o", apiKey: apiKey });
   const result = await llm.invoke(prompt);
   let refactoredCode = result.content.toString().trim();
+
   // Clean up markdown code block fences if the model includes them
   return refactoredCode
     .replace(/^```[\w]*\n?/, "")
@@ -222,10 +358,11 @@ export async function activate(
   context: vscode.ExtensionContext
 ): Promise<void> {
   console.log("CodePilot is now active!");
-
+  const outputChannel = vscode.window.createOutputChannel("CodePilot");
   if (!fs.existsSync(context.globalStorageUri.fsPath)) {
     fs.mkdirSync(context.globalStorageUri.fsPath, { recursive: true });
   }
+  // const outputChannel = vscode.window.createOutputChannel("CodePilot");
 
   // --- COMMAND: Ingest Docs ---
   context.subscriptions.push(
@@ -316,7 +453,8 @@ export async function activate(
                 context,
                 editor.document.languageId,
                 selectedText,
-                userInstruction
+                userInstruction,
+                outputChannel
               );
               if (!newCode || token.isCancellationRequested) return;
 
@@ -374,7 +512,8 @@ export async function activate(
                 context,
                 endpointName,
                 collectionName,
-                language
+                language,
+                outputChannel
               );
 
               if (codeSnippet) {

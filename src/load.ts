@@ -2,7 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { Document } from "@langchain/core/documents";
 import { ChatOpenAI } from "@langchain/openai";
-import { connect } from "@lancedb/lancedb"; // <-- Added
+import { connect } from "@lancedb/lancedb";
 import { OpenAIEmbeddings } from "@langchain/openai";
 import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
 import dotenv from "dotenv";
@@ -19,7 +19,7 @@ export class IngestionTool {
     this.llm = new ChatOpenAI({
       model: "gpt-3.5-turbo",
       temperature: 0,
-      apiKey: openaiApiKey, // Updated parameter name for newer versions
+      apiKey: openaiApiKey,
     });
     this.textSplitter = new RecursiveCharacterTextSplitter({
       chunkSize: 1000,
@@ -27,8 +27,8 @@ export class IngestionTool {
     });
     console.log("Using OpenAI embeddings");
     this.embeddings = new OpenAIEmbeddings({
-      apiKey: openaiApiKey, // Updated parameter name
-      model: "text-embedding-3-small", // Updated parameter name
+      apiKey: openaiApiKey,
+      model: "text-embedding-3-small",
       batchSize: 20,
     });
   }
@@ -42,7 +42,6 @@ export class IngestionTool {
     const dbPath = path.join(storagePath, collectionName);
 
     if (fs.existsSync(dbPath)) {
-      // Updated log message for clarity
       console.log(`✅ LanceDB store for '${collectionName}' already exists.`);
       console.log(
         "Skipping ingestion to save on API costs. Delete the folder to re-ingest."
@@ -73,7 +72,6 @@ export class IngestionTool {
       console.log(
         ">>> Step 5: Creating embeddings and saving LanceDB store..."
       );
-      // Updated function call
       await this.createAndSaveLanceDBStore(chunks, collectionName, storagePath);
       return true;
     } catch (error) {
@@ -94,6 +92,27 @@ export class IngestionTool {
     return out;
   }
 
+  private constructUrlFromPostman(urlData: any): string {
+    if (!urlData) {
+      return "";
+    }
+    if (typeof urlData === "string") {
+      return urlData;
+    }
+    if (typeof urlData === "object" && urlData !== null) {
+      if (urlData.raw) {
+        return urlData.raw;
+      }
+      const protocol = urlData.protocol || "https";
+      const host = (urlData.host || []).join(".");
+      const path = (urlData.path || []).join("/");
+      if (host) {
+        return `${protocol}://${host}/${path}`;
+      }
+    }
+    return "";
+  }
+
   private async createDocumentsFromEndpoints(
     endpoints: any[],
     company: string
@@ -101,15 +120,23 @@ export class IngestionTool {
     const documents: Document[] = [];
     for (const ep of endpoints) {
       const name = ep.name?.trim() || "";
+      const url = this.constructUrlFromPostman(ep.request?.url);
       const baseMeta = {
         name,
         company,
         method: ep.request?.method?.toUpperCase() || "",
+        url: url,
       };
 
       if (ep.request?.description) {
+        const descriptionText =
+          typeof ep.request.description === "string"
+            ? ep.request.description
+            : ep.request.description?.content || "";
+
+        const contentWithUrl = `Endpoint URL: ${url}\n\n${descriptionText}`;
         const enhancedDesc = await this.enhanceDescription(
-          ep.request.description,
+          contentWithUrl,
           name,
           company
         );
@@ -157,7 +184,6 @@ export class IngestionTool {
       return response.content.toString().trim();
     } catch (error) {
       console.warn(`Failed to enhance description for '${name}': ${error}`);
-      // Return original description if enhancement fails
       return desc;
     }
   }
@@ -180,53 +206,26 @@ export class IngestionTool {
       return;
     }
 
-    // Your truncation logic is still correct
-    const maxChunkSize = 6000;
-    chunks.forEach((chunk) => {
-      if (chunk.pageContent.length > maxChunkSize) {
-        console.log(
-          `-> Truncating oversized chunk: ${chunk.metadata.name} (${chunk.pageContent.length} chars)`
-        );
-        chunk.pageContent =
-          chunk.pageContent.substring(0, maxChunkSize) + "... [truncated]";
-      }
-    });
-
-    // --- START OF THE DEFINITIVE FIX ---
-
-    // Step 1: Manually create embeddings for all document chunks.
-    // The OpenAIEmbeddings class handles batching this for us.
     console.log(`-> Creating embeddings for ${chunks.length} chunks...`);
     const texts = chunks.map((chunk) => chunk.pageContent);
     const vectors = await this.embeddings.embedDocuments(texts);
 
-    // Step 2: Combine the original chunks with their vectors into plain objects.
     const data = chunks.map((chunk, i) => ({
       text: chunk.pageContent,
       metadata: chunk.metadata,
-      vector: vectors[i], // Add the pre-computed vector
+      vector: vectors[i],
     }));
 
-    // Step 3: Connect to the DB and create the table with the complete data.
-    // LanceDB can now perfectly infer the schema because the `vector` field exists.
     console.log("-> Connecting to LanceDB and creating table...");
     const db = await connect(dbPath);
     await db.createTable(collectionName, data);
-
-    // --- END OF THE FIX ---
 
     console.log(
       `-> Successfully saved LanceDB index with ${chunks.length} chunks.`
     );
   }
-
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
 }
 
-// ... The rest of your file (ingestPostmanCollection and the localTest block) remains exactly the same ...
-// Export function for VS Code extension use
 export async function ingestPostmanCollection(
   postmanPath: string,
   collectionName: string,
